@@ -1,0 +1,90 @@
+---
+title: "Prisma Postgres Source Setup Guide"
+---
+
+import PubNote from '/snippets/pg-publication-note.mdx';
+
+This is a guide on how to create a [Prisma Postgres](https://www.prisma.io/postgres) peer which you can use for replication in PeerDB.
+
+## Enable Logical Replication
+
+Prisma Postgres comes with logical replication enabled by default. Ensure that the settings below are configured as shown.
+
+```sql
+SHOW wal_level; -- should be logical
+SHOW max_wal_senders; -- should be 10
+SHOW max_replication_slots; -- should be 10
+```
+
+## Database User and Permissions
+
+The other PostgreSQL guides create a dedicated `peerdb_user` with the `REPLICATION` attribute. Prisma Postgres does not allow creating or altering roles, so `CREATE USER` and `ALTER USER ... WITH REPLICATION` fail with the errors below:
+
+```
+ERROR:  restricted superuser cannot create roles
+ERROR:  restricted superuser cannot alter roles
+```
+
+Use the user from your Prisma Postgres connection string for PeerDB instead. This user can already read your tables, create replication slots and bypass RLS policies, so no `GRANT` statements are needed.
+
+## Create a Publication
+
+Connect to your database with the direct connection string and create a [publication](https://www.postgresql.org/docs/current/logical-replication-publication.html) with the tables you want to replicate. We strongly recommend only including the tables you need in the publication to avoid performance overhead.
+
+<PubNote />
+
+1. To create a publication for specific tables:
+
+    ```sql
+    CREATE PUBLICATION peerdb_publication FOR TABLE table_to_replicate, table_to_replicate2;
+    ```
+
+2. To create a publication for all tables in a specific schema:
+
+    ```sql
+    CREATE PUBLICATION peerdb_publication FOR TABLES IN SCHEMA "public";
+    ```
+
+The `peerdb_publication` publication will contain the set of change events generated from the specified tables, and will later be used to create the MIRROR (replication).
+
+## Copy Connection Details
+
+Open your project in the [Prisma Console](https://console.prisma.io), select your database, click **Connect to your database** and generate a connection string. Copy the **direct** connection string, which has the following shape:
+
+```
+postgres://USER:PASSWORD@db.prisma.io:5432/postgres?sslmode=require
+```
+
+<Warning>
+Use the direct host `db.prisma.io`. PeerDB cannot connect through the pooled host `pooled.db.prisma.io`, and peer validation fails with `Failed to connect to upstream database`.
+</Warning>
+
+## Create Prisma Postgres Peer in PeerDB
+
+Head over to the PeerDB UI and click on **Create Peer**. Select **Postgres** as the source.
+
+<Frame caption="Create peer drop down">
+<img src="/images/setup/create_postgres_peer.png" />
+</Frame>
+
+Fill in the connection details from the connection string that you copied in the previous step:
+
+- **Host**: `db.prisma.io`
+- **Port**: `5432`
+- **User** and **Password**: the user and password from the connection string
+- **Database**: `postgres`
+- **Require TLS?**: enabled
+
+Click on **Validate** and once that's green, you can go ahead and click on **Create** to create the peer!
+
+<Note>
+When creating the Mirror, make sure to reuse the same publication you created earlier.
+</Note>
+
+## Important Gotchas
+
+A paused mirror keeps its replication slot, and the slot retains WAL on the source until the mirror is resumed. Prisma Postgres does not limit how much WAL a slot can retain (`SHOW max_slot_wal_keep_size` returns `-1`), so resume or drop mirrors that you no longer need. Dropping a mirror in PeerDB also drops its replication slot. The publication is not dropped, so remove it yourself once it is no longer used:
+
+```sql
+DROP PUBLICATION peerdb_publication;
+```
